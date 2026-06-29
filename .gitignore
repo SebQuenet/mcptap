@@ -1,0 +1,7 @@
+node_modules/
+dist/
+SPEC.md
+*.log
+.mcptap/
+*.db
+.DS_Store

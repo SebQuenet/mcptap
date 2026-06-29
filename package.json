@@ -1,0 +1,21 @@
+{
+  "name": "mcptap",
+  "version": "0.0.0",
+  "description": "The DevTools network tab for MCP. Records every tool call locally. Leaks nothing.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "mcptap": "./dist/cli.js"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
