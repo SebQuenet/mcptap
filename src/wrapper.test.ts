@@ -61,3 +61,40 @@ test("passes traffic through byte-faithfully and records both directions", async
 
   store.close();
 });
+
+test("pairs the round-trip into an exchange with estimated tokens and a duration", async () => {
+  const store = new Store(":memory:");
+  store.init();
+
+  const clientIn = new PassThrough();
+  const clientOut = new PassThrough();
+  let sawResponse = false;
+  clientOut.on("data", () => (sawResponse = true));
+
+  const { sessionId, exited } = startWrapper({
+    command: process.execPath,
+    args: [fixture("echo-server.mjs")],
+    label: "echo",
+    store,
+    clientIn,
+    clientOut,
+  });
+
+  clientIn.write('{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n');
+  await waitFor(() => sawResponse);
+  clientIn.end();
+  await exited;
+
+  const exchanges = store.getExchanges(sessionId);
+  expect(exchanges).toHaveLength(1);
+  expect(exchanges[0]).toMatchObject({
+    jsonrpcId: "1",
+    method: "tools/list",
+    isError: false,
+  });
+  expect(exchanges[0].reqTokens).toBeGreaterThan(0);
+  expect(exchanges[0].respTokens).toBeGreaterThan(0);
+  expect(exchanges[0].durationMs).toBeGreaterThanOrEqual(0);
+
+  store.close();
+});

@@ -26,6 +26,20 @@ export interface RecordMessageInput {
   byteSize: number;
 }
 
+export interface ExchangeRow {
+  requestMsgId: number;
+  responseMsgId: number | null;
+  sessionId: string;
+  method: string | null;
+  toolName: string | null;
+  jsonrpcId: string;
+  startedAt: number;
+  durationMs: number | null;
+  isError: boolean;
+  reqTokens: number | null;
+  respTokens: number | null;
+}
+
 export interface MessageRow {
   id: number;
   sessionId: string;
@@ -63,6 +77,20 @@ CREATE TABLE IF NOT EXISTS messages (
   byte_size   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, ts);
+CREATE TABLE IF NOT EXISTS exchanges (
+  request_msg_id   INTEGER NOT NULL REFERENCES messages(id),
+  response_msg_id  INTEGER REFERENCES messages(id),
+  session_id       TEXT NOT NULL REFERENCES sessions(id),
+  method           TEXT,
+  tool_name        TEXT,
+  jsonrpc_id       TEXT NOT NULL,
+  started_at       INTEGER NOT NULL,
+  duration_ms      INTEGER,
+  is_error         INTEGER NOT NULL DEFAULT 0,
+  req_tokens       INTEGER,
+  resp_tokens      INTEGER,
+  PRIMARY KEY (session_id, jsonrpc_id)
+);
 `;
 
 export class Store {
@@ -110,7 +138,77 @@ export class Store {
         input.estTokens ?? null,
         input.byteSize,
       );
-    return Number(result.lastInsertRowid);
+    const msgId = Number(result.lastInsertRowid);
+    this.updateExchange(msgId, input);
+    return msgId;
+  }
+
+  private updateExchange(msgId: number, input: RecordMessageInput): void {
+    if (input.jsonrpcId === null) return; // notifications have no exchange
+
+    if (input.kind === "request") {
+      this.db
+        .prepare(
+          `INSERT INTO exchanges
+             (request_msg_id, session_id, method, tool_name, jsonrpc_id, started_at, req_tokens)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          msgId,
+          input.sessionId,
+          input.method,
+          input.toolName,
+          input.jsonrpcId,
+          input.ts,
+          input.estTokens ?? null,
+        );
+      return;
+    }
+
+    if (input.kind === "response" || input.kind === "error") {
+      const open = this.db
+        .prepare(`SELECT started_at FROM exchanges WHERE session_id = ? AND jsonrpc_id = ?`)
+        .get(input.sessionId, input.jsonrpcId) as { started_at: number } | undefined;
+      if (!open) return; // orphan response: kept in messages only
+
+      this.db
+        .prepare(
+          `UPDATE exchanges
+             SET response_msg_id = ?, duration_ms = ?, is_error = ?, resp_tokens = ?
+           WHERE session_id = ? AND jsonrpc_id = ?`,
+        )
+        .run(
+          msgId,
+          input.ts - open.started_at,
+          input.kind === "error" ? 1 : 0,
+          input.estTokens ?? null,
+          input.sessionId,
+          input.jsonrpcId,
+        );
+    }
+  }
+
+  getExchanges(sessionId: string): ExchangeRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT request_msg_id, response_msg_id, session_id, method, tool_name, jsonrpc_id,
+                started_at, duration_ms, is_error, req_tokens, resp_tokens
+         FROM exchanges WHERE session_id = ? ORDER BY started_at, request_msg_id`,
+      )
+      .all(sessionId) as Record<string, unknown>[];
+    return rows.map((r) => ({
+      requestMsgId: r.request_msg_id as number,
+      responseMsgId: (r.response_msg_id as number | null) ?? null,
+      sessionId: r.session_id as string,
+      method: (r.method as string | null) ?? null,
+      toolName: (r.tool_name as string | null) ?? null,
+      jsonrpcId: r.jsonrpc_id as string,
+      startedAt: r.started_at as number,
+      durationMs: (r.duration_ms as number | null) ?? null,
+      isError: (r.is_error as number) === 1,
+      reqTokens: (r.req_tokens as number | null) ?? null,
+      respTokens: (r.resp_tokens as number | null) ?? null,
+    }));
   }
 
   getMessages(sessionId: string): MessageRow[] {

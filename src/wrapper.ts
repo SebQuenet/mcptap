@@ -3,6 +3,7 @@ import type { Readable, Writable } from "node:stream";
 import { classifyMessage } from "./classify.js";
 import { FrameParser, type Frame } from "./frame-parser.js";
 import type { Direction, Store } from "./store.js";
+import { estimateTokens } from "./tokens.js";
 
 export interface StartWrapperOptions {
   command: string;
@@ -33,6 +34,7 @@ export function startWrapper(opts: StartWrapperOptions): WrapperHandle {
   const record = (frame: Frame, direction: Direction): void => {
     try {
       const byteSize = Buffer.byteLength(frame.raw, "utf8");
+      const estTokens = estimateTokens(frame.raw);
       if (frame.kind === "malformed") {
         store.recordMessage({
           sessionId,
@@ -43,6 +45,7 @@ export function startWrapper(opts: StartWrapperOptions): WrapperHandle {
           jsonrpcId: null,
           ts: Date.now(),
           payload: frame.raw,
+          estTokens,
           byteSize,
         });
         return;
@@ -57,6 +60,7 @@ export function startWrapper(opts: StartWrapperOptions): WrapperHandle {
         jsonrpcId: c.jsonrpcId,
         ts: Date.now(),
         payload: frame.raw,
+        estTokens,
         byteSize,
       });
     } catch {
