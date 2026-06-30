@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs, type ParsedArgs } from "./cli-args.js";
 import { knownConfigPaths } from "./config-paths.js";
 import { runInit, type InitItemResult } from "./init.js";
+import { startViewer } from "./server.js";
 import { Store } from "./store.js";
 import { startWrapper } from "./wrapper.js";
 
@@ -59,6 +61,24 @@ function printInitSummary(results: InitItemResult[], parsed: Extract<ParsedArgs,
   if (parsed.dryRun) console.log("\n(dry run — no files were modified)");
 }
 
+async function runView(parsed: Extract<ParsedArgs, { cmd: "view" }>): Promise<void> {
+  const dbPath = defaultDbPath();
+  if (!existsSync(dbPath)) {
+    console.error(
+      "No capture database yet. Run `mcptap init`, use your MCP client, then `mcptap view`.",
+    );
+    process.exit(1);
+  }
+
+  const store = new Store(dbPath);
+  store.init();
+
+  const staticDir = join(dirname(fileURLToPath(import.meta.url)), "..", "dist-viewer");
+  const server = await startViewer(store, parsed.port, existsSync(staticDir) ? staticDir : undefined);
+  const port = (server.address() as { port: number }).port;
+  console.log(`mcptap viewer → http://127.0.0.1:${port}  (Ctrl-C to stop)`);
+}
+
 function printHelp(): void {
   console.log(`mcptap — the DevTools network tab for MCP
 
@@ -79,8 +99,7 @@ async function main(): Promise<void> {
       runInitCommand(parsed);
       return;
     case "view":
-      console.error("mcptap view: not implemented yet (M4).");
-      process.exit(1);
+      await runView(parsed);
       return;
     case "purge":
       console.error("mcptap purge: not implemented yet (M5).");

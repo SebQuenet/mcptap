@@ -40,6 +40,44 @@ export interface ExchangeRow {
   respTokens: number | null;
 }
 
+export type ExchangeStatus = "ok" | "error" | "pending";
+
+export interface TimelineItem {
+  sessionId: string;
+  serverLabel: string;
+  client: string | null;
+  jsonrpcId: string;
+  method: string | null;
+  toolName: string | null;
+  startedAt: number;
+  durationMs: number | null;
+  status: ExchangeStatus;
+  reqTokens: number | null;
+  respTokens: number | null;
+}
+
+export interface TimelineFilters {
+  status?: ExchangeStatus;
+  serverLabel?: string;
+  method?: string;
+  toolName?: string;
+  sessionId?: string;
+  search?: string;
+}
+
+export interface CostBucket {
+  calls: number;
+  tokens: number;
+}
+
+export interface CostSummary {
+  exchangeCount: number;
+  errorCount: number;
+  totalTokens: number;
+  byTool: ({ toolName: string } & CostBucket)[];
+  byServer: ({ serverLabel: string } & CostBucket)[];
+}
+
 export interface MessageRow {
   id: number;
   sessionId: string;
@@ -231,6 +269,119 @@ export class Store {
       estTokens: (r.est_tokens as number | null) ?? null,
       byteSize: r.byte_size as number,
     }));
+  }
+
+  getExchangeMessages(sessionId: string, jsonrpcId: string): MessageRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, session_id, direction, kind, method, tool_name, jsonrpc_id, ts, payload, est_tokens, byte_size
+         FROM messages WHERE session_id = ? AND jsonrpc_id = ? ORDER BY ts, id`,
+      )
+      .all(sessionId, jsonrpcId) as Record<string, unknown>[];
+    return rows.map((r) => ({
+      id: r.id as number,
+      sessionId: r.session_id as string,
+      direction: r.direction as Direction,
+      kind: r.kind as string,
+      method: (r.method as string | null) ?? null,
+      toolName: (r.tool_name as string | null) ?? null,
+      jsonrpcId: (r.jsonrpc_id as string | null) ?? null,
+      ts: r.ts as number,
+      payload: r.payload as string,
+      estTokens: (r.est_tokens as number | null) ?? null,
+      byteSize: r.byte_size as number,
+    }));
+  }
+
+  getTimeline(filters: TimelineFilters = {}): TimelineItem[] {
+    const rows = this.db
+      .prepare(
+        `SELECT e.session_id, e.jsonrpc_id, e.method, e.tool_name, e.started_at, e.duration_ms,
+                e.is_error, e.response_msg_id, e.req_tokens, e.resp_tokens,
+                e.request_msg_id, s.server_label, s.client
+         FROM exchanges e JOIN sessions s ON s.id = e.session_id
+         ORDER BY e.started_at DESC, e.request_msg_id DESC`,
+      )
+      .all() as Record<string, unknown>[];
+
+    let items: TimelineItem[] = rows.map((r) => {
+      const responseMsgId = (r.response_msg_id as number | null) ?? null;
+      const isError = (r.is_error as number) === 1;
+      const status: ExchangeStatus =
+        responseMsgId === null ? "pending" : isError ? "error" : "ok";
+      return {
+        sessionId: r.session_id as string,
+        serverLabel: r.server_label as string,
+        client: (r.client as string | null) ?? null,
+        jsonrpcId: r.jsonrpc_id as string,
+        method: (r.method as string | null) ?? null,
+        toolName: (r.tool_name as string | null) ?? null,
+        startedAt: r.started_at as number,
+        durationMs: (r.duration_ms as number | null) ?? null,
+        status,
+        reqTokens: (r.req_tokens as number | null) ?? null,
+        respTokens: (r.resp_tokens as number | null) ?? null,
+      };
+    });
+
+    if (filters.status) items = items.filter((i) => i.status === filters.status);
+    if (filters.serverLabel) items = items.filter((i) => i.serverLabel === filters.serverLabel);
+    if (filters.method) items = items.filter((i) => i.method === filters.method);
+    if (filters.toolName) items = items.filter((i) => i.toolName === filters.toolName);
+    if (filters.sessionId) items = items.filter((i) => i.sessionId === filters.sessionId);
+    if (filters.search) {
+      const q = filters.search.toLowerCase();
+      items = items.filter(
+        (i) =>
+          (i.method ?? "").toLowerCase().includes(q) ||
+          (i.toolName ?? "").toLowerCase().includes(q),
+      );
+    }
+    return items;
+  }
+
+  getCostSummary(): CostSummary {
+    const rows = this.db
+      .prepare(
+        `SELECT e.tool_name, e.is_error, e.req_tokens, e.resp_tokens, s.server_label
+         FROM exchanges e JOIN sessions s ON s.id = e.session_id`,
+      )
+      .all() as Record<string, unknown>[];
+
+    let totalTokens = 0;
+    let errorCount = 0;
+    const byTool = new Map<string, CostBucket>();
+    const byServer = new Map<string, CostBucket>();
+
+    const bump = (map: Map<string, CostBucket>, key: string, tokens: number) => {
+      const bucket = map.get(key) ?? { calls: 0, tokens: 0 };
+      bucket.calls += 1;
+      bucket.tokens += tokens;
+      map.set(key, bucket);
+    };
+
+    for (const r of rows) {
+      const tokens = ((r.req_tokens as number | null) ?? 0) + ((r.resp_tokens as number | null) ?? 0);
+      totalTokens += tokens;
+      if ((r.is_error as number) === 1) errorCount += 1;
+      const toolName = r.tool_name as string | null;
+      if (toolName) bump(byTool, toolName, tokens);
+      bump(byServer, r.server_label as string, tokens);
+    }
+
+    const sortByTokens = <T extends CostBucket>(a: T, b: T) => b.tokens - a.tokens;
+
+    return {
+      exchangeCount: rows.length,
+      errorCount,
+      totalTokens,
+      byTool: [...byTool.entries()]
+        .map(([toolName, b]) => ({ toolName, ...b }))
+        .sort(sortByTokens),
+      byServer: [...byServer.entries()]
+        .map(([serverLabel, b]) => ({ serverLabel, ...b }))
+        .sort(sortByTokens),
+    };
   }
 
   close(): void {
